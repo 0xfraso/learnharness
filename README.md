@@ -55,7 +55,7 @@ Advanced users can set a [prompt-cache retention preference](docs/compaction-acc
 
 All three platforms support in-app updates.
 
-**Dictation:** Create a [Deepgram API key](https://console.deepgram.com/) with the **Member role or higher** ([required for token minting](https://developers.deepgram.com/reference/auth/tokens/grant)) and add it under **Settings → Providers → Dictation**. Choose the language below the key; **Multilingual** supports automatic recognition and mixed-language speech. A `403 Insufficient permissions` error during token minting can indicate an insufficient key role.
+**Dictation:** Create a [Deepgram API key](https://console.deepgram.com/) with the **Member role or higher** ([required for token minting](https://developers.deepgram.com/reference/auth/tokens/grant)) and add it under **Settings → Providers → Dictation**. Choose the language below the key; **Multilingual** supports automatic recognition and mixed-language speech. A `403 Insufficient permissions` error during token minting can indicate an insufficient key role. Alternatively, pick **Groq** as the dictation engine (Settings → Keys → Dictation → Engine): it uses a [Groq API key](https://console.groq.com/keys) and batches the whole run through the app server at stop — no streaming socket.
 
 ## Your keys, your data
 

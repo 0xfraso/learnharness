@@ -34,7 +34,7 @@ import { CLAUDE_CODE_PROVIDER } from "./contracts/claude-code.ts";
 import type { ModelRole } from "../../config.ts";
 import type { ChatSettings } from "./contracts/chat.ts";
 import type { SearchEngineId } from "./search.ts";
-import { isDictationLanguage, type DictationLanguage } from "./dictation.ts";
+import { isDictationLanguage, isDictationProvider, type DictationLanguage, type DictationProvider } from "./dictation.ts";
 
 /** The schema version this code understands. Bump ONLY for breaking shape
  *  changes (a field renamed/meaning changed); pure additions never bump. */
@@ -338,6 +338,9 @@ export interface GeneralSettings {
 /** One app-wide dictation preference, shared by every composer. */
 export interface DictationSettings {
 	language?: DictationLanguage;
+	/** The transcription engine (default deepgram). Groq batches the run's
+	 *  audio through the server at stop; Deepgram streams renderer → cloud. */
+	provider?: DictationProvider;
 }
 
 /** Agent settings — everything about the non-conversation machinery. */
@@ -508,7 +511,7 @@ export interface FactorySettings {
 export const FACTORY_SETTINGS: FactorySettings = {
 	version: CURRENT_SETTINGS_VERSION,
 	general: { autoUpdate: true },
-	dictation: { language: "en" },
+	dictation: { language: "en", provider: "deepgram" },
 	appearance: {
 		mode: "dark",
 		background: null, // the dark default (#141414) lives in the mode's derivation curve
@@ -808,10 +811,16 @@ export function sanitizeUserSettings(raw: unknown): UserSettings | null {
 	}
 	if (r.dictation !== undefined) {
 		const raw = r.dictation;
-		out.dictation = raw !== null && typeof raw === "object" && !Array.isArray(raw) &&
-			isDictationLanguage((raw as Record<string, unknown>).language)
-			? { language: (raw as DictationSettings).language }
-			: {};
+		const valid = raw !== null && typeof raw === "object" && !Array.isArray(raw) &&
+			isDictationLanguage((raw as Record<string, unknown>).language);
+		if (valid) {
+			const provider = (raw as Record<string, unknown>).provider;
+			out.dictation = isDictationProvider(provider)
+				? { language: (raw as DictationSettings).language, provider }
+				: { language: (raw as DictationSettings).language };
+		} else {
+			out.dictation = {};
+		}
 	}
 	if (r.claudeCode !== undefined) {
 		const raw = r.claudeCode;

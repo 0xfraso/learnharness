@@ -28,7 +28,7 @@ import type {
 } from "../core/settings.ts";
 import { BACKGROUND_MODEL_ROLES, CACHE_RETENTIONS, COMPACTION_THRESHOLD_FLOOR, CUSTOM_MODEL_PIN_FLOOR, EXTRACTION_CHUNK_TOKENS_FLOOR, MODEL_SLOTS } from "../core/settings.ts";
 import { WRITABLE_TOOL_KEYS } from "../core/pending.ts";
-import { isDictationLanguage } from "../core/dictation.ts";
+import { isDictationLanguage, isDictationProvider } from "../core/dictation.ts";
 
 /** Parsed-or-rejected — `ok: false` carries the 400's error message. */
 export type SettingsBodyResult<T> =
@@ -396,13 +396,25 @@ export function parseCompactionSettingsBody(body: unknown): SettingsBodyResult<C
 	return { ok: true, settings };
 }
 
-/** dictation: { language?: one of Nova-3's supported language codes } */
+/** dictation: { language?: Nova-3 code, provider?: "deepgram" | "groq" }.
+ *  The section is replace-whole, and the one client (the dictation store)
+ *  always sends BOTH fields in a single PUT — a partial body legally
+ *  drops the absent field per the house discipline. */
 export function parseDictationSettingsBody(body: unknown): SettingsBodyResult<DictationSettings> {
 	const raw = asRecord(body);
 	if (!raw) return { ok: false, error: "Invalid JSON body" };
-	if (raw.language === undefined) return { ok: true, settings: {} };
-	if (!isDictationLanguage(raw.language)) return { ok: false, error: "Unsupported dictation language" };
-	return { ok: true, settings: { language: raw.language } };
+	const settings: DictationSettings = {};
+	if (raw.language !== undefined) {
+		if (!isDictationLanguage(raw.language)) return { ok: false, error: "Unsupported dictation language" };
+		settings.language = raw.language;
+	}
+	if (raw.provider !== undefined) {
+		if (!isDictationProvider(raw.provider)) {
+			return { ok: false, error: "Unsupported dictation engine (deepgram | groq)" };
+		}
+		settings.provider = raw.provider;
+	}
+	return { ok: true, settings };
 }
 
 /** The custom endpoint's per-model pins (PATCH /api/custom-provider): the

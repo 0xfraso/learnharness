@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { DICTATION_LANGUAGES, type DictationLanguage } from "@/src/core";
+import { DICTATION_PROVIDERS, DICTATION_LANGUAGES, isDictationProvider, type DictationLanguage, type DictationProvider } from "@/src/core";
 import { MenuShell } from "@/components/menu-shell";
 import { Hint } from "@/components/ui/hint";
-import { SettingsMenuTrigger, SettingsRow } from "@/components/settings/controls";
+import { SettingsMenuTrigger, SettingsRow, ThinSelect } from "@/components/settings/controls";
 import { SearchMenuList } from "@/components/settings/search-menu-list";
 import { useDictationActive } from "@/components/dictation-state";
 import { useDictationLanguage } from "@/components/dictation-preference";
@@ -16,6 +16,33 @@ export function DictationLanguageSetting() {
 	const active = useDictationActive();
 	return <SettingsRow label="Language" testid="row-dictation-language" dimmed={active}>
 		<DictationLanguagePicker preference={preference} disabled={active} />
+	</SettingsRow>;
+}
+
+/** The dictation engine (groq wave): Deepgram streams renderer → cloud;
+ *  Groq batches the whole run through the server at stop. Both read the
+ *  language preference; the picker swaps engines live between runs. */
+export function DictationEngineSetting() {
+	const preference = useDictationLanguage();
+	const active = useDictationActive();
+	const { provider, saving, error, getProvider, saveProvider } = preference;
+	useEffect(() => {
+		if (provider === undefined) void getProvider().catch(() => {});
+	}, [provider, getProvider]);
+	return <SettingsRow label="Engine" testid="row-dictation-engine" dimmed={active}>
+		<Hint label={error ?? "Dictation engine: Deepgram streams; Groq batches at stop"} side="top">
+			<ThinSelect
+				value={provider ?? "deepgram"}
+				ariaLabel="Dictation engine"
+				testid="dictation-engine"
+				disabled={active || saving || provider === undefined}
+				onChange={(next) => { if (isDictationProvider(next)) void saveProvider(next); }}
+			>
+				{DICTATION_PROVIDERS.map((p) => (
+					<option key={p} value={p}>{p === "deepgram" ? "Deepgram" : "Groq"}</option>
+				))}
+			</ThinSelect>
+		</Hint>
 	</SettingsRow>;
 }
 

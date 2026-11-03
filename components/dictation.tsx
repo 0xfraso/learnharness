@@ -7,6 +7,9 @@ import { Hint } from "@/components/ui/hint";
 import { deepgramListenUrl, type DictationLanguage } from "@/src/core";
 import { useDictationLanguage } from "@/components/dictation-preference";
 import { setDictationActive } from "@/components/dictation-state";
+import {
+	MAX_DICTATION_PCM_BYTES, pcm16Wav, type DictationProvider, type PcmFrame,
+} from "@/src/core";
 export { isDictationActive } from "@/components/dictation-state";
 
 /**
@@ -110,6 +113,11 @@ export const DEEPGRAM_KEY_ID = "DEEPGRAM_API_KEY";
  * it and deep-links Settings → Keys → the Deepgram row. */
 export const DICTATION_KEYLESS = "Dictation needs a Deepgram key";
 
+/** The Groq twin: the batch route's 503 (no GROQ_API_KEY). The Groq key is
+ *  a MODEL-PROVIDER key (Add → Groq), not a curated row, so its click can
+ *  only deep-link the Keys SECTION — there is no row id to unfold. */
+export const DICTATION_GROQ_KEYLESS = "Dictation needs a Groq key";
+
 /** Mint a fresh short-lived token (the route holds the real key
  *  server-side). Module-level: the start path's warm cache and the
  *  reconnect path both bottom out here. The keyless 503 (no
@@ -134,6 +142,18 @@ async function mintFreshToken(): Promise<string> {
  *  refresh() re-mints in the background (page mount, run end); its
  *  failures are silently tolerated (a keyless pre-mint just doesn't warm). */
 export const WARM_TOKEN_TTL_MS = 3 * 60_000;
+
+/** The Groq engine's key-presence probe (GET /api/stt/groq): run
+ *  CONCURRENTLY with the mic acquisition so a keyless Groq selection
+ *  fails at the click, never after the user dictated a paragraph. No
+ *  cache — the probe is a local roundtrip, and a key can be added
+ *  mid-session (the warm-token TTL discipline doesn't apply). */
+async function groqKeyPresent(): Promise<boolean> {
+	const res = await fetch("/api/stt/groq");
+	if (!res.ok) return false;
+	const data = await res.json() as { present?: boolean };
+	return data.present === true;
+}
 
 export type WarmMinter = { mint: () => Promise<string>; refresh: () => void };
 
@@ -215,11 +235,13 @@ export function appendToPrimaryInput(text: string): boolean {
  * pending question's dock) need finish() without a prop bridge. Same
  * module-level pattern as questionTarget — one window, one instance,
  * one finisher. Empty registry (no hook mounted) → resolve immediately. */
-let dictationFinisher: (() => Promise<void>) | null = null;
+let dictationFinisher: (() => Promise<boolean>) | null = null;
 
-/** Finish any live dictation run before continuing (see Dictation.finish). */
-export function finishDictation(): Promise<void> {
-	return dictationFinisher ? dictationFinisher() : Promise.resolve();
+/** Finish any live dictation run before continuing (see Dictation.finish).
+ *  Resolves FALSE when the run ended without a usable transcript — callers
+ *  gating a submit on the spoken tail must check it. */
+export function finishDictation(): Promise<boolean> {
+	return dictationFinisher ? dictationFinisher() : Promise.resolve(true);
 }
 
 /** Join a dictated final onto the current text (shared separator rule). */
@@ -253,19 +275,18 @@ export type Dictation = {
 	/** Not idle — from the click until the stop completes (the optimistic window). */
 	active: boolean;
 	/** End + KEEP the transcript: flush the deferred buffer into the primary
-	 *  input (the Stop pill and ⌘D). */
+	 *  input (the Stop pill and ⌘D). Resolves TRUE only when the transcript
+	 *  actually landed — a submit path that awaits this must not send a
+	 *  message missing its dictated tail (groq wave: a failed/cancelled
+	 *  batch transcription resolves FALSE; the Deepgram paths keep their
+	 *  old proceed-on-end semantics, cancel included). */
 	toggle: () => void;
 	stop: () => void;
-	/** FINISH, THEN CONTINUE (owner, 2026-10-01 "nothing gets lost" round):
-	 *  if a run is live, stop it and resolve only when the run has fully
-	 *  ended — Deepgram's last finals have landed in the target field. A
-	 *  submit path awaits this before building its payload, so a learner
-	 *  who forgets to stop dictation before Enter never loses the spoken
-	 *  reasoning. Idle → resolves immediately (the common no-run submit
-	 *  pays nothing). Every terminal path runs cleanup(), and cleanup()
-	 *  resolves the waiters — cancel (Esc) resolves them too, by its
-	 *  discard semantics. */
-	finish: () => Promise<void>;
+	/** FINISH, THEN CONTINUE: resolves FALSE when the run ended without a
+	 *  usable transcript (engine failure, keyless Groq, cancelled Groq run);
+	 *  TRUE when idle, ended cleanly, or cancelled on the Deepgram engine
+	 *  (that proceed-on-cancel is today's contract — untouched here). */
+	finish: () => Promise<boolean>;
 	/** End + DISCARD the transcript: no flush, immediate teardown. The Esc
 	 *  semantics (owner, 2026-09-17 round 3): Esc is a cancel, not a stop —
 	 *  before, it flushed exactly like the toggle did. */
@@ -282,7 +303,7 @@ export type Dictation = {
  * question waits.
  */
 export function useDictation({ append }: { append: (text: string) => void }): Dictation {
-	const { getLanguage } = useDictationLanguage();
+	const { getLanguage, getProvider } = useDictationLanguage();
 	const [phase, setPhase] = useState<DictationPhase>("idle");
 	const [error, setError] = useState<string | null>(null);
 	/** Latest RMS from the worklet — the meter samples this (dictate pattern). */
@@ -309,8 +330,9 @@ export function useDictation({ append }: { append: (text: string) => void }): Di
 	const workletRef = useRef<AudioWorkletNode | null>(null);
 	/** Frames captured before the socket is OPEN (mitigation A): flushed in
 	 *  order on open; capped at 256 frames (≈32s) with the oldest dropped;
-	 *  cleared at teardown so a dead run's audio can't leak into the next. */
-	const pendingRef = useRef<ArrayBuffer[]>([]);
+	 *  cleared at teardown so a dead run's audio can't leak into the next.
+	 *  PcmFrame: the worklet posts Int16Array VIEWS, not ArrayBuffers. */
+	const pendingRef = useRef<PcmFrame[]>([]);
 	const genRef = useRef(0); // stale-handler guard (dictate pattern)
 	const safetyRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const reconnectsRef = useRef(0);
@@ -318,8 +340,28 @@ export function useDictation({ append }: { append: (text: string) => void }): Di
 	 *  run and flush into the primary input once, at teardown. */
 	const bufferRef = useRef<string[]>([]);
 	/** Resolvers waiting for the run to fully end (finish(), owner
-	 *  2026-10-01): released by cleanup() — every terminal path runs it. */
-	const waitersRef = useRef<Array<() => void>>([]);
+	 *  2026-10-01): released by cleanup() — every terminal path runs it.
+	 *  groq wave: each carries the run's outcome (see runOkRef). */
+	const waitersRef = useRef<Array<(ok: boolean) => void>>([]);
+	/** The live run's engine — set at start, read by the worklet's audio
+	 *  handler (stream vs accumulate) and by stop (CloseStream vs POST). */
+	const engineRef = useRef<DictationProvider>("deepgram");
+	/** The batch engine's accumulated PCM chunks — the worklet's Int16Array
+	 *  views (see PcmFrame). Capped at the WAV budget — oldest dropped, same
+	 *  discipline as the handshake queue; the cap is ~25 minutes of speech,
+	 *  a corruption guard, not a UX limit. */
+	const framesRef = useRef<PcmFrame[]>([]);
+	const framesBytesRef = useRef(0);
+	/** The run's outcome for finish() waiters — true unless a terminal
+	 *  failure (or a cancelled Groq run, whose transcript was discarded)
+	 *  marks it false before cleanup() releases the waiters. */
+	const runOkRef = useRef(true);
+	/** The batch stop's idempotence latch: React's phase closure can lag one
+	 *  render behind (finish() → stop() sets "stopping"; a toggle captured on
+	 *  the previous render re-enters stop() seeing "recording") — the second
+	 *  entry would find empty frames and cleanup() the live run, discarding
+	 *  the in-flight upload. Only the first stop owns the teardown. */
+	const groqStoppingRef = useRef(false);
 
 	/** Flush the buffered transcript into the primary input — question claim
 	 *  first, composer fallback. Called exactly once per run, at cleanup; the
@@ -341,6 +383,9 @@ export function useDictation({ append }: { append: (text: string) => void }): Di
 			safetyRef.current = null;
 		}
 		pendingRef.current = [];
+		framesRef.current = []; // batch engine: discard any untranscribed tail
+		framesBytesRef.current = 0;
+		groqStoppingRef.current = false; // the next run's stop owns the latch
 		for (const track of streamRef.current?.getTracks() ?? []) track.stop();
 		streamRef.current = null;
 		sourceRef.current?.disconnect();
@@ -358,8 +403,11 @@ export function useDictation({ append }: { append: (text: string) => void }): Di
 		setPhase("idle");
 		// The finish() waiters ride until NOW — post-flush, post-teardown:
 		// a submit path resuming after `await finishDictation()` reads the
-		// target field with the dictated tail already in it.
-		for (const w of waitersRef.current.splice(0)) w();
+		// target field with the dictated tail already in it (or knows the
+		// transcript was lost, groq wave).
+		const ok = runOkRef.current;
+		runOkRef.current = true; // next run starts optimistic
+		for (const w of waitersRef.current.splice(0)) w(ok);
 		// Pre-mint for the next run (mitigation D) — best-effort; a keyless
 		// page just doesn't warm.
 		if (warmNext) warmTokens.refresh();
@@ -418,11 +466,13 @@ export function useDictation({ append }: { append: (text: string) => void }): Di
 						.catch(() => {
 							if (gen === genRef.current) {
 								setError("Deepgram reconnect failed");
+								runOkRef.current = false;
 								cleanup();
 							}
 						});
 				} else {
 					setError(`Deepgram connection lost (${ev.code})`);
+					runOkRef.current = false;
 					cleanup();
 				}
 			});
@@ -435,28 +485,38 @@ export function useDictation({ append }: { append: (text: string) => void }): Di
 		setError(null);
 		setPhase("connecting");
 		reconnectsRef.current = 0;
+		runOkRef.current = true; // fresh run, optimistic outcome
 		bufferRef.current = []; // fresh run, fresh buffer (round 2)
 		pendingRef.current = []; // fresh run, fresh queue (mitigation A)
+		framesRef.current = []; // fresh run, fresh batch buffer
+		framesBytesRef.current = 0;
+		groqStoppingRef.current = false; // fresh run, latch released
 		const gen = ++genRef.current;
 		let language: DictationLanguage;
+		let engine: DictationProvider;
 		try {
-			language = await getLanguage();
+			[language, engine] = await Promise.all([getLanguage(), getProvider()]);
 		} catch (e) {
 			if (gen !== genRef.current) return;
-			setError(e instanceof Error ? e.message : "Dictation language unavailable");
+			setError(e instanceof Error ? e.message : "Dictation preference unavailable");
 			cleanup();
 			return;
 		}
 		if (gen !== genRef.current) return;
+		engineRef.current = engine;
 
-		// Mitigation D: the warm token (pre-minted at mount / after the last
-		// run) resolves ~instantly; a cold/keyless mint surfaces below. The
-		// mic is the long pole (macOS HAL + APM init) and gates everything —
-		// the token runs concurrently with it. 127.0.0.1 is a secure
-		// context, so getUserMedia works without TLS; macOS TCC prompts on
-		// first use.
-		const tokenPromise = warmTokens.mint();
-		tokenPromise.catch(() => {}); // surfaced below; no unhandled rejection
+		// Engine setup starts CONCURRENTLY with the mic (the long pole —
+		// macOS HAL + APM init, macOS TCC prompts on first use). Deepgram
+		// mints a token (mitigation D); Groq probes key presence (a keyless
+		// selection must fail at the click, not after the paragraph).
+		const enginePromise = engine === "deepgram"
+			? warmTokens.mint()
+			: groqKeyPresent();
+		enginePromise.catch(() => {}); // surfaced below; no unhandled rejection
+
+		// The mic is the long pole (macOS HAL + APM init) and gates everything.
+		// 127.0.0.1 is a secure context, so getUserMedia works without TLS;
+		// macOS TCC prompts on first use.
 		const micPromise = navigator.mediaDevices.getUserMedia({
 			audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
 		});
@@ -479,12 +539,21 @@ export function useDictation({ append }: { append: (text: string) => void }): Di
 			const worklet = new AudioWorkletNode(ctx, "pcm-capture");
 			workletRef.current = worklet;
 			worklet.port.onmessage = (e) => {
-				const msg = e.data as { type: string; rms?: number; buffer?: ArrayBuffer };
+				const msg = e.data as { type: string; rms?: number; buffer?: PcmFrame };
 				if (msg.type === "level") {
 					levelRef.current = msg.rms ?? 0; // never reset to zero (dictate pattern)
 				} else if (msg.type === "audio") {
 					const ws = wsRef.current;
-					if (ws && ws.readyState === WebSocket.OPEN) ws.send(msg.buffer!);
+					if (engineRef.current === "groq") {
+						// Batch engine: accumulate for the single stop-time POST.
+						// No socket, no handshake queue — the run IS the buffer.
+						framesRef.current.push(msg.buffer!);
+						framesBytesRef.current += msg.buffer!.byteLength;
+						while (framesBytesRef.current > MAX_DICTATION_PCM_BYTES) {
+							const dropped = framesRef.current.shift();
+							framesBytesRef.current -= dropped?.byteLength ?? 0;
+						}
+					} else if (ws && ws.readyState === WebSocket.OPEN) ws.send(msg.buffer!);
 					// Mitigation A: not OPEN yet (handshake or reconnect gap) —
 					// queue, capped; the open handler flushes in order.
 					else {
@@ -508,16 +577,33 @@ export function useDictation({ append }: { append: (text: string) => void }): Di
 						? e.message
 						: "mic unavailable";
 			setError(msg);
+			runOkRef.current = false;
 			cleanup();
 			return;
 		}
 		if (gen !== genRef.current) return;
+		// Mitigation B, per engine: Deepgram's handshake fires the moment the
+		// graph is live; Groq's key verdict lands in parallel and either arms
+		// the batch run or fails honestly at the click.
+		if (engine === "groq") {
+			const present = await enginePromise as boolean;
+			if (gen !== genRef.current) return;
+			if (!present) {
+				setError(DICTATION_GROQ_KEYLESS);
+				runOkRef.current = false;
+				cleanup();
+				return;
+			}
+			setPhase("recording");
+			return;
+		}
 		let token: string;
 		try {
-			token = await tokenPromise;
+			token = await enginePromise as string;
 		} catch (e) {
 			if (gen !== genRef.current) return;
 			setError(e instanceof Error ? e.message : "token unavailable");
+			runOkRef.current = false;
 			cleanup();
 			return;
 		}
@@ -525,7 +611,7 @@ export function useDictation({ append }: { append: (text: string) => void }): Di
 		// Mitigation B: the handshake fires the moment the graph is live,
 		// overlapping any remaining token wait — mic-gated, never before it.
 		openSocket(gen, token, language);
-	}, [openSocket, cleanup, getLanguage]);
+	}, [openSocket, cleanup, getLanguage, getProvider]);
 
 	const stop = useCallback(() => {
 		const gen = genRef.current;
@@ -542,6 +628,49 @@ export function useDictation({ append }: { append: (text: string) => void }): Di
 		workletRef.current = null;
 
 		const ws = wsRef.current;
+		if (engineRef.current === "groq") {
+			if (groqStoppingRef.current) return; // stale-closure re-entry: the first stop owns the teardown
+			groqStoppingRef.current = true;
+			// Batch engine: the whole run's audio leaves NOW — encode the
+			// accumulated PCM as WAV and POST it to the server route (which
+			// holds the key). The transcript rides the same deferred buffer
+			// as streaming finals: cleanup() flushes it into the input.
+			const frames = framesRef.current;
+			framesRef.current = [];
+			framesBytesRef.current = 0;
+			if (frames.length === 0) {
+				// Zero-length run (instant stop): nothing dictated — end clean.
+				cleanup();
+				return;
+			}
+			void (async () => {
+				try {
+					const blob = pcm16Wav(frames); // throws on corrupt/oversized capture
+					const res = await fetch("/api/stt/groq", {
+						method: "POST",
+						headers: { "Content-Type": "audio/wav" },
+						body: blob,
+						signal: AbortSignal.timeout(130_000), // the route aborts upstream at 120s
+					});
+					const data = await res.json() as { text?: string; message?: string };
+					if (gen !== genRef.current) return; // cancel/unmount won — discard
+					if (!res.ok || typeof data.text !== "string") {
+						setError(data.message ?? `Groq dictation failed (${res.status})`);
+						runOkRef.current = false;
+						cleanup();
+						return;
+					}
+					if (data.text.trim()) bufferRef.current.push(data.text);
+					cleanup();
+				} catch (e) {
+					if (gen !== genRef.current) return;
+					setError(e instanceof Error ? e.message : "Groq dictation failed");
+					runOkRef.current = false;
+					cleanup();
+				}
+			})();
+			return;
+		}
 		if (ws && ws.readyState === WebSocket.OPEN) {
 			try {
 				ws.send(JSON.stringify({ type: "CloseStream" }));
@@ -565,13 +694,17 @@ export function useDictation({ append }: { append: (text: string) => void }): Di
 		// buffer makes that flush a no-op. Also kills a "stopping" run: the
 		// flush already underway is abandoned (its timer is cleared inside).
 		bufferRef.current = [];
+		// groq wave: a cancelled Groq run's transcript never landed — a submit
+		// resuming from finish() must not proceed without the spoken tail.
+		// Deepgram keeps today's proceed-on-cancel contract (owner round 3).
+		if (engineRef.current === "groq") runOkRef.current = false;
 		cleanup();
 	}, [phase, cleanup]);
 
-	const finish = useCallback((): Promise<void> => {
+	const finish = useCallback((): Promise<boolean> => {
 		return new Promise((resolve) => {
 			if (phase === "idle") {
-				resolve();
+				resolve(true);
 				return;
 			}
 			waitersRef.current.push(resolve);
@@ -649,7 +782,7 @@ export function DictationBar({ dictation }: { dictation: Dictation }) {
 	 *  idle button deep-links Settings → Keys → the Deepgram row and clears
 	 *  the error — the surface is clean when the user returns. Any other
 	 *  error keeps the old behavior (click = retry, which clears). */
-	const keyless = error === DICTATION_KEYLESS;
+	const keyless = error === DICTATION_KEYLESS || error === DICTATION_GROQ_KEYLESS;
 	const [levels, setLevels] = useState<number[]>(() => new Array(METER_CELLS).fill(0));
 	/** Adaptive cell count (owner round 2): derived from the meter's
 	 *  measured width — narrow rows show fewer bars instead of
@@ -702,9 +835,15 @@ export function DictationBar({ dictation }: { dictation: Dictation }) {
 				<button
 					type="button"
 					onClick={() => {
-						if (keyless) {
+						if (error === DICTATION_KEYLESS) {
 							clearError();
 							openSettings("keys", DEEPGRAM_KEY_ID);
+						} else if (error === DICTATION_GROQ_KEYLESS) {
+							// The Groq key rides the MODEL-PROVIDER table (Add → Groq),
+							// not a curated row — there is no row id to unfold, so the
+							// click lands on the Keys section.
+							clearError();
+							openSettings("keys");
 						} else {
 							toggle();
 						}

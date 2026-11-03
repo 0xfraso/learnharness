@@ -27,6 +27,15 @@ async function search(value: string, element = input()) {
 		element.dispatchEvent(new window.Event("input", { bubbles: true }));
 	});
 }
+/** Set a <select> and fire its change — React listens for "change" events.
+ *  linkedom exposes `value` as a getter-only prototype property, so the
+ *  test shadows it with an own property (React reads e.target.value). */
+async function select(element: HTMLSelectElement, value: string) {
+	await act(async () => {
+		Object.defineProperty(element, "value", { value, configurable: true });
+		element.dispatchEvent(new window.Event("change", { bubbles: true }));
+	});
+}
 
 async function fixture(failRead = false) {
 	const { window: win, document: doc } = parseHTML("<html><body><div id='root'></div></body></html>");
@@ -195,7 +204,7 @@ test("a remounted picker stays disabled throughout an outstanding save", async (
 	assert.equal(trigger().disabled, true);
 	await click(trigger());
 	assert.equal(menu(), null);
-	f.state.record.dictation = { language: "multi" };
+	f.state.record.dictation = { language: "multi", provider: "deepgram" };
 	await act(async () => { complete(Response.json({ settings: f.state.record })); });
 	assert.equal(trigger().disabled, false);
 	assert.match(trigger().textContent!, /Multilingual/);
@@ -227,14 +236,16 @@ for (const source of ["none", "file", "env"] as const) test(`Language is below t
 	const group = byTest("group-dictation");
 	const rows = group.lastElementChild!.children;
 	assert.equal(rows[0]!.getAttribute("data-testid"), "key-deepgram_api_key");
-	assert.equal(rows[1]!.getAttribute("data-testid"), "row-dictation-language");
-	assert.equal(rows[2]!.getAttribute("data-testid"), "dictation-setup-hint");
-	assert.equal(byTest("dictation-setup-hint").textContent, "Create a Deepgram API key with the Member role or higher, then add it above.");
+	assert.equal(rows[1]!.getAttribute("data-testid"), "row-dictation-engine");
+	assert.equal(rows[2]!.getAttribute("data-testid"), "row-dictation-language");
+	assert.equal(rows[3]!.getAttribute("data-testid"), "dictation-setup-hint");
+	assert.match(byTest("dictation-setup-hint").textContent!, /Deepgram needs an API key with the Member role or higher, added above/);
+	assert.match(byTest("dictation-setup-hint").textContent!, /Groq uses the model-provider key \(Add → Groq\)/);
 	assert.match(byTest("dictation-setup-hint").className, /text-muted-foreground/);
 	assert.equal(byTest("dictation-setup-hint").querySelector("a")!.href, "https://console.deepgram.com/");
-	assert.equal(byTest("dictation-setup-hint").querySelector("a")!.textContent, "Deepgram API key");
-	assert.equal(byTest("dictation-setup-hint").querySelectorAll("a").length, 1);
-	assert.match(rows[1]!.querySelector(".font-prose")!.className, /text-\(length:--lh-prose-size\)/);
+	assert.equal(byTest("dictation-setup-hint").querySelectorAll("a").length, 2);
+	assert.equal(byTest("dictation-setup-hint").querySelectorAll("a")[1]!.href, "https://console.groq.com/keys");
+	assert.match(rows[2]!.querySelector(".font-prose")!.className, /text-\(length:--lh-prose-size\)/);
 	assert.equal(trigger().disabled, false, "language is independent of key ownership");
 	await click(byTest("key-deepgram_api_key-row"));
 	if (source !== "env") assert.ok(byTest("key-deepgram_api_key-editor"));
@@ -245,6 +256,26 @@ for (const source of ["none", "file", "env"] as const) test(`Language is below t
 	assert.equal(menu(), null);
 	assert.equal(f.state.outerEscapes, 0);
 	if (source !== "env") assert.ok(byTest("key-deepgram_api_key-editor"), "first Escape closes only the menu");
+});
+
+test("the engine select persists the provider with the language through one PUT", async () => {
+	const f = await fixture();
+	const { KeysSection } = await import("../components/settings/keys-section.tsx");
+	await f.render(<KeysSection />);
+	const engine = document.querySelector<HTMLSelectElement>('[data-testid="dictation-engine"]')!;
+	assert.ok(engine, "the engine row renders inside the Dictation group");
+	assert.deepEqual([...engine.options].map((o) => o.value), ["deepgram", "groq"]);
+	assert.equal(engine.value, "deepgram", "the factory engine shows until a choice is saved");
+	await select(engine, "groq");
+	assert.equal(engine.value, "groq");
+	// The section is replace-whole: the confirmed record carries BOTH fields.
+	assert.deepEqual(f.state.record.dictation, { language: "en", provider: "groq" });
+	await select(engine, "deepgram");
+	assert.deepEqual(f.state.record.dictation, { language: "en", provider: "deepgram" });
+	// Capture locks the engine row exactly like the language row.
+	await act(async () => { setDictationActive(true); });
+	assert.equal(document.querySelector<HTMLSelectElement>('[data-testid="dictation-engine"]')!.disabled, true);
+	await act(async () => { setDictationActive(false); });
 });
 
 test("the shared model menu preserves ranking, provider identity, keyboard clamping, and row content", async () => {

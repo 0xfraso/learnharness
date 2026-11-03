@@ -145,7 +145,7 @@ test("waits for the saved language; reconnect preserves it and finals still flus
 	await act(async () => { first.open(); first.final("Cześć"); });
 	assert.deepEqual(f.state.appends, []);
 	// A preference refresh during capture affects the next run only.
-	f.state.record.dictation = { language: "multi" };
+	f.state.record.dictation = { language: "multi", provider: "deepgram" };
 	await act(async () => { notifySettingsSaved("dictation"); });
 	await act(async () => { first.end(1006); });
 	const second = Socket.all[1]!;
@@ -209,7 +209,7 @@ test("a shortcut waits for a language save made by the separate settings control
 	await act(async () => { saved = f.setting.save("multi"); });
 	await act(async () => { f.dictation.toggle(); });
 	assert.equal(f.state.captures, 0);
-	f.state.record.dictation = { language: "multi" };
+	f.state.record.dictation = { language: "multi", provider: "deepgram" };
 	await act(async () => { write.resolve(Response.json({ settings: f.state.record })); await saved; });
 	assert.equal(Socket.all[0]!.language, "multi");
 });
@@ -219,7 +219,7 @@ test("a saved-language refresh gates capture even when an older choice is cached
 	await f.mount();
 	const read = deferred<Response>();
 	f.state.nextRead = read.promise;
-	f.state.record.dictation = { language: "multi" };
+	f.state.record.dictation = { language: "multi", provider: "deepgram" };
 	await act(async () => { notifySettingsSaved("dictation"); });
 	await act(async () => { f.dictation.toggle(); });
 	assert.equal(f.state.captures, 0);
@@ -263,7 +263,7 @@ test("reopening settings during a save shares its busy state and rejects a compe
 	await f.remount();
 	assert.equal(f.setting.saving, true);
 	assert.equal(await f.setting.save("en"), false, "a different selection cannot inherit another write's success");
-	f.state.record.dictation = { language: "multi" };
+	f.state.record.dictation = { language: "multi", provider: "deepgram" };
 	await act(async () => { write.resolve(Response.json({ settings: f.state.record })); await first; });
 	assert.equal(f.setting.saving, false);
 	assert.equal(f.setting.language, "multi");

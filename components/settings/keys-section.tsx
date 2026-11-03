@@ -40,7 +40,7 @@ import { ClaudeCodeInstallationStatus } from "./claude-code-status.tsx";
 import { ProviderMenuList } from "./model-menu.tsx";
 import { MenuShell } from "@/components/menu-shell";
 import { notifySettingsSaved } from "@/components/settings-signal";
-import { DictationLanguageSetting } from "@/components/dictation-language";
+import { DictationEngineSetting, DictationLanguageSetting } from "@/components/dictation-language";
 
 /** One pi-ai provider with plain API-key auth (the Platform seam —
  *  derived from pi-ai's own env-key table; no drift possible). */
@@ -599,14 +599,20 @@ export function KeysSection({
 					/>
 				))}
 				{label === "Dictation" && <>
+					<DictationEngineSetting />
 					<DictationLanguageSetting />
 					<p data-testid="dictation-setup-hint" className="px-1 text-[11px] leading-relaxed text-muted-foreground/70">
-						Create a <a
+						Deepgram needs an <a
 							href="https://console.deepgram.com/"
 							target="_blank"
 							rel="noreferrer"
 							className="underline underline-offset-2 hover:text-foreground"
-						>Deepgram API key</a> with the Member role or higher, then add it above.
+						>API key</a> with the Member role or higher, added above. Groq uses the model-provider key (Add → Groq) from <a
+							href="https://console.groq.com/keys"
+							target="_blank"
+							rel="noreferrer"
+							className="underline underline-offset-2 hover:text-foreground"
+						>console.groq.com</a>.
 					</p>
 				</>}
 			</SettingsGroup>)}

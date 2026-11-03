@@ -59,7 +59,7 @@ test("stale reads cannot overwrite a newer write and subscribers see busy before
 	let stale!: (response: Response) => void;
 	let nextRead: Promise<Response> | undefined;
 	const store = createDictationLanguageStore(async (_url, init) => {
-		if (init?.method === "PUT") return Response.json({ settings: { version: 1, dictation: { language: "multi" } } });
+		if (init?.method === "PUT") return Response.json({ settings: { version: 1, dictation: JSON.parse(init.body as string) } });
 		if (nextRead) { const response = nextRead; nextRead = undefined; return response; }
 		return Response.json({ settings: { version: 1, dictation: { language: "pl" } } });
 	});
@@ -96,7 +96,7 @@ for (const newestFirst of [false, true]) test(`overlapping reads keep the newest
 
 test("capture also waits for a write initiated as a pending read publishes its result", async () => {
 	const store = createDictationLanguageStore(async (_url, init) => Response.json({ settings: {
-		version: 1, dictation: { language: init?.method === "PUT" ? "multi" : "en" },
+		version: 1, dictation: init?.method === "PUT" ? JSON.parse(init.body as string) : { language: "en" },
 	} }));
 	let started = false;
 	const off = store.subscribe(() => {
